@@ -21,19 +21,24 @@ tables_dir <- file.path(results_dir, "tables")
 dir.create(plots_dir, recursive = TRUE, showWarnings = FALSE)
 dir.create(tables_dir, recursive = TRUE, showWarnings = FALSE)
 
+# Initialize logging system
+source(file.path(src_dir, "utils", "logging.R"))
+initialize_logging()
+
 # Pipeline execution
-cat("========================================\n")
-cat("TCGA Multi-omics DIABLO Analysis Pipeline\n")
-cat("========================================\n\n")
+log_info("========================================")
+log_info("TCGA Multi-omics DIABLO Analysis Pipeline")
+log_info("========================================")
 
 # Record start time
 start_time <- Sys.time()
+pipeline_id <- log_operation_start("Complete TCGA Multi-omics Pipeline", "DIABLO Analysis")
 
 # Step 1: Multi-omics Data Download
-cat("Step 1: Downloading multi-omics TCGA data...\n")
-cat("  - Downloading breast cancer mRNA, miRNA, and protein data\n")
-cat("  - Creating training and test sets\n")
-cat("  - Extracting breast cancer subtype information\n")
+log_info("Step 1: Downloading multi-omics TCGA data...")
+log_info("  - Downloading breast cancer mRNA, miRNA, and protein data")
+log_info("  - Creating training and test sets")
+log_info("  - Extracting breast cancer subtype information")
 source(file.path(src_dir, "06_multiomics_download.R"))
 
 # Step 2: Multi-omics Data Preprocessing
@@ -69,14 +74,15 @@ end_time <- Sys.time()
 runtime <- end_time - start_time
 
 # Pipeline summary
-cat("\n========================================\n")
-cat("Pipeline completed successfully!\n")
-cat("========================================\n")
-cat("Runtime: ", format(runtime), "\n")
-cat("Results saved to:\n")
-cat("- Multi-omics data: ", file.path(data_dir, "multiomics"), "\n")
-cat("- Plots: ", plots_dir, "\n")
-cat("- Tables: ", tables_dir, "\n")
+log_operation_end(pipeline_id, "Pipeline completed successfully")
+log_info("========================================")
+log_info("Pipeline completed successfully!")
+log_info("========================================")
+log_info("Runtime: %s", format(runtime))
+log_info("Results saved to:")
+log_info("- Multi-omics data: %s", file.path(data_dir, "multiomics"))
+log_info("- Plots: %s", plots_dir)
+log_info("- Tables: %s", tables_dir)
 
 # Load final results for summary
 multiomics_dir <- file.path(data_dir, "multiomics")
@@ -204,4 +210,7 @@ create_quick_report <- function() {
 # Create quick report
 create_quick_report()
 
-cat("\nMulti-omics DIABLO analysis pipeline completed successfully!\n")
+# Log session summary
+log_session_summary()
+
+log_info("Multi-omics DIABLO analysis pipeline completed successfully!")
