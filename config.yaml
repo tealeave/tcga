@@ -20,8 +20,55 @@ analysis:
     - "TP63"
     - "KRT5"
 
+# Multi-omics Analysis Parameters
+multiomics:
+  # Feature selection parameters
+  feature_selection:
+    mrna_top_genes: 5000
+    mirna_top_features: 200
+    protein_missing_threshold: 0.3
+  
+  # DIABLO parameters
+  diablo:
+    max_components: 3
+    correlation_cutoff: 0.7
+    validation_method: "Mfold"
+    cv_folds: 5
+    cv_repeats: 10
+    stability_bootstrap: 50
+    
+    # keepX test values for tuning
+    keepx_test_values:
+      mrna: [5, 10, 15, 20, 25, 30]
+      mirna: [5, 10, 15, 20, 25]
+      protein: [5, 10, 15, 20]
+  
+  # Block sPLS-DA parameters
+  block_splsda:
+    max_components: 3
+    validation_method: "Mfold"
+    cv_folds: 5
+    cv_repeats: 10
+    
+  # Design matrix parameters
+  design_matrix:
+    default_correlation: 0.1
+    
+  # Breast cancer subtypes
+  subtypes:
+    - "Basal"
+    - "Her2"
+    - "LumA"
+    
+  # Training/test split
+  train_test_split:
+    train_samples_per_subtype: 50
+    test_samples_per_subtype: 25
+    random_seed: 42
+
 # TCGA Data Download
 tcga:
+  # Original lung cancer projects
   projects:
     - "TCGA-LUAD"
     - "TCGA-LUSC"
@@ -33,6 +80,27 @@ tcga:
   # Download parameters
   download_method: "api"
   files_per_chunk: 10
+  
+  # Multi-omics data download (breast cancer)
+  multiomics_projects:
+    - "TCGA-BRCA"
+    
+  # Data types for multi-omics analysis
+  data_types:
+    mrna:
+      data_category: "Transcriptome Profiling"
+      data_type: "Gene Expression Quantification"
+      workflow_type: "STAR - Counts"
+    mirna:
+      data_category: "Transcriptome Profiling"
+      data_type: "miRNA Expression Quantification"
+    protein:
+      data_category: "Proteome Profiling"
+      data_type: "Protein Expression Quantification"
+    clinical:
+      data_category: "Clinical"
+      data_type: "Clinical Supplement"
+      data_format: "BCR XML"
 
 # Visualization Parameters
 visualization:
@@ -50,6 +118,46 @@ visualization:
   colors:
     luad: "#E31A1C"
     lusc: "#1F78B4"
+    # Multi-omics subtype colors
+    basal: "#E31A1C"
+    her2: "#1F78B4"
+    luma: "#33A02C"
+  
+  # Multi-omics visualization parameters
+  multiomics:
+    # Network plot parameters
+    network_cutoff: 0.7
+    network_width: 12
+    network_height: 10
+    
+    # Sample plot parameters
+    sample_plot_width: 10
+    sample_plot_height: 8
+    
+    # Biomarker plot parameters
+    biomarker_plot_width: 12
+    biomarker_plot_height: 8
+    biomarker_top_n: 20
+    
+    # Heatmap parameters
+    heatmap_width: 14
+    heatmap_height: 10
+    
+    # Arrow plot parameters
+    arrow_plot_width: 12
+    arrow_plot_height: 10
+    
+    # Block colors for data types
+    block_colors:
+      mrna: "lightblue"
+      mirna: "mistyrose"
+      protein: "lightgreen"
+      
+    # Node shapes for network plots
+    node_shapes:
+      mrna: "rectangle"
+      mirna: "circle"
+      protein: "triangle"
   
   # Plot formats
   formats:
@@ -84,6 +192,7 @@ r_environment:
       - "org.Hs.eg.db"
       - "edgeR"
       - "ComplexHeatmap"
+      - "mixOmics"  # Core multi-omics analysis
     cran:
       - "ggplot2"
       - "ggfortify"
@@ -91,3 +200,19 @@ r_environment:
       - "tidyr"
       - "RColorBrewer"
       - "gridExtra"
+      - "igraph"      # Network analysis
+      - "corrplot"    # Correlation plots
+      - "circlize"    # Circular plots
+      - "yaml"        # Configuration file reading
+      
+  # Multi-omics specific packages
+  multiomics_packages:
+    bioconductor:
+      - "mixOmics"
+      - "SummarizedExperiment"
+    cran:
+      - "igraph"
+      - "corrplot"
+      - "circlize"
+      - "gridExtra"
+      - "RColorBrewer"
