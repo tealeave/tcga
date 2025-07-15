@@ -1,0 +1,93 @@
+# TCGA RNA-seq Analysis Configuration
+
+# Analysis Parameters
+analysis:
+  # Number of top variable genes to use for PCA
+  top_variable_genes: 1000
+  
+  # CPM normalization parameters
+  cpm_log_transform: true
+  cpm_prior_count: 1
+  
+  # PCA parameters
+  pca_center: true
+  pca_scale: false
+  
+  # Marker genes for analysis
+  marker_genes:
+    - "NAPSA"
+    - "TFF1" 
+    - "TP63"
+    - "KRT5"
+
+# TCGA Data Download
+tcga:
+  projects:
+    - "TCGA-LUAD"
+    - "TCGA-LUSC"
+  
+  data_category: "Transcriptome Profiling"
+  data_type: "Gene Expression Quantification"
+  workflow_type: "STAR - Counts"
+  
+  # Download parameters
+  download_method: "api"
+  files_per_chunk: 10
+
+# Visualization Parameters
+visualization:
+  # Plot dimensions
+  plot_width: 8
+  plot_height: 6
+  plot_dpi: 300
+  
+  # Heatmap parameters
+  heatmap_top_genes: 50
+  heatmap_width: 12
+  heatmap_height: 8
+  
+  # Color palette
+  colors:
+    luad: "#E31A1C"
+    lusc: "#1F78B4"
+  
+  # Plot formats
+  formats:
+    - "png"
+    - "pdf"  # For heatmaps
+
+# Statistical Analysis
+statistics:
+  # Multiple testing correction method
+  p_adjust_method: "BH"
+  
+  # Significance threshold
+  alpha: 0.05
+
+# File Paths
+paths:
+  data_dir: "data"
+  results_dir: "results"
+  plots_dir: "results/plots"
+  tables_dir: "results/tables"
+  src_dir: "src"
+
+# R Environment
+r_environment:
+  module: "R/4.4.2"
+  renv_activate: true
+  
+  # Required packages
+  packages:
+    bioconductor:
+      - "TCGAbiolinks"
+      - "org.Hs.eg.db"
+      - "edgeR"
+      - "ComplexHeatmap"
+    cran:
+      - "ggplot2"
+      - "ggfortify"
+      - "dplyr"
+      - "tidyr"
+      - "RColorBrewer"
+      - "gridExtra"
