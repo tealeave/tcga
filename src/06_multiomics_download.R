@@ -7,7 +7,16 @@ suppressMessages({
   library(SummarizedExperiment)
 })
 
-cat("Loading multi-omics data download functions...\n")
+# Load logging utilities
+source(file.path("src", "utils", "logging.R"))
+
+# Initialize logging if not already done
+if (is.null(.log_config)) {
+  initialize_logging()
+}
+
+log_info("=== Multi-omics Data Download Module ===")
+log_info("Loading multi-omics data download functions...")
 
 # Create multi-omics data directory
 multiomics_dir <- file.path(data_dir, "multiomics")
@@ -15,93 +24,374 @@ dir.create(multiomics_dir, recursive = TRUE, showWarnings = FALSE)
 
 # Download mRNA data for breast cancer
 download_mrna_data <- function() {
-  cat("Downloading mRNA data for TCGA-BRCA...\n")
+  operation_id <- log_operation_start("mRNA Data Download", "TCGA-BRCA Gene Expression Quantification")
   
-  # Query mRNA data
-  query_mrna <- GDCquery(
-    project = "TCGA-BRCA",
-    data.category = "Transcriptome Profiling",
-    data.type = "Gene Expression Quantification",
-    workflow.type = "STAR - Counts"
-  )
+  # Check if processed data already exists
+  save_path <- file.path(multiomics_dir, "mrna_data.RData")
+  if (file.exists(save_path)) {
+    log_info("Found existing mRNA data, loading from file...")
+    load(save_path)
+    log_data_summary(mrna_counts, "mRNA counts matrix (loaded)")
+    log_data_summary(mrna_samples, "mRNA sample metadata (loaded)", "data.frame")
+    log_operation_end(operation_id, "Success (loaded existing data)")
+    return(list(counts = mrna_counts, samples = mrna_samples))
+  }
   
-  # Download the data
-  GDCdownload(query_mrna, method = "api", files.per.chunk = 10)
+  result <- with_error_handling({
+    # Query mRNA data
+    log_info("Querying mRNA data from GDC...")
+    query_mrna <- GDCquery(
+      project = "TCGA-BRCA",
+      data.category = "Transcriptome Profiling",
+      data.type = "Gene Expression Quantification",
+      workflow.type = "STAR - Counts"
+    )
+    
+    log_info("Found %d mRNA files for download", length(query_mrna$results[[1]]$id))
+    
+    # Download the data
+    log_info("Downloading mRNA data files...")
+    GDCdownload(query_mrna, method = "api", files.per.chunk = 10)
+    
+    # Prepare the data
+    log_info("Preparing mRNA data...")
+    mrna_data <- GDCprepare(query_mrna)
+    
+    # Extract counts matrix
+    mrna_counts <- assay(mrna_data)
+    log_data_summary(mrna_counts, "mRNA counts matrix")
+    
+    # Extract sample information
+    mrna_samples <- as.data.frame(colData(mrna_data))
+    log_data_summary(mrna_samples, "mRNA sample metadata", "data.frame")
+    
+    # Save data
+    save(mrna_counts, mrna_samples, file = save_path)
+    log_file_operation("saved", save_path, TRUE, "mRNA data")
+    
+    # Clean up temporary files
+    cleanup_temp_files()
+    
+    list(counts = mrna_counts, samples = mrna_samples)
+  }, "mRNA Data Download")
   
-  # Prepare the data
-  mrna_data <- GDCprepare(query_mrna)
-  
-  # Extract counts matrix
-  mrna_counts <- assay(mrna_data)
-  
-  # Extract sample information
-  mrna_samples <- as.data.frame(colData(mrna_data))
-  
-  # Save data
-  save(mrna_counts, mrna_samples, file = file.path(multiomics_dir, "mrna_data.RData"))
-  cat("mRNA data downloaded and saved.\n")
-  
-  return(list(counts = mrna_counts, samples = mrna_samples))
+  log_operation_end(operation_id, if(!is.null(result)) "Success" else "Failed")
+  return(result)
 }
 
-# Download miRNA data for breast cancer
-download_mirna_data <- function() {
-  cat("Downloading miRNA data for TCGA-BRCA...\n")
+# Helper function to process individual miRNA files
+process_mirna_files <- function(query_mirna) {
+  log_info("Processing individual miRNA quantification files...")
   
-  # Query miRNA data
-  query_mirna <- GDCquery(
-    project = "TCGA-BRCA",
-    data.category = "Transcriptome Profiling",
-    data.type = "miRNA Expression Quantification"
-  )
+  # Get the file information from the query
+  files_info <- query_mirna$results[[1]]
   
-  # Download the data
-  GDCdownload(query_mirna, method = "api", files.per.chunk = 10)
+  # Find all downloaded miRNA files
+  mirna_dir <- file.path("GDCdata", "TCGA-BRCA", "Transcriptome_Profiling", "miRNA_Expression_Quantification")
   
-  # Prepare the data
-  mirna_data <- GDCprepare(query_mirna)
+  # Initialize data structures
+  mirna_counts_list <- list()
+  mirna_ids <- NULL
   
-  # Extract counts matrix
-  mirna_counts <- assay(mirna_data)
+  # Process each sample directory
+  for (i in 1:nrow(files_info)) {
+    file_id <- files_info$id[i]
+    sample_dir <- file.path(mirna_dir, file_id)
+    
+    if (dir.exists(sample_dir)) {
+      # Find the quantification file in the directory
+      quant_files <- list.files(sample_dir, pattern = "\\.mirbase21\\.mirnas\\.quantification\\.txt$", full.names = TRUE)
+      
+      if (length(quant_files) > 0) {
+        quant_file <- quant_files[1]
+        
+        # Read the quantification file
+        mirna_data <- read.delim(quant_file, header = TRUE, stringsAsFactors = FALSE)
+        
+        # Extract read counts (second column)
+        counts <- mirna_data$read_count
+        names(counts) <- mirna_data$miRNA_ID
+        
+        # Store in list with file UUID as name
+        mirna_counts_list[[file_id]] <- counts
+        
+        # Set miRNA IDs if not already set
+        if (is.null(mirna_ids)) {
+          mirna_ids <- mirna_data$miRNA_ID
+        }
+      }
+    }
+    
+    # Log progress periodically
+    if (i %% 100 == 0) {
+      log_progress(i, nrow(files_info), "Processing miRNA files")
+    }
+  }
   
-  # Extract sample information
-  mirna_samples <- as.data.frame(colData(mirna_data))
+  log_info("Successfully processed %d miRNA files", length(mirna_counts_list))
   
-  # Save data
-  save(mirna_counts, mirna_samples, file = file.path(multiomics_dir, "mirna_data.RData"))
-  cat("miRNA data downloaded and saved.\n")
+  # Create the count matrix
+  log_info("Building miRNA count matrix...")
+  sample_ids <- names(mirna_counts_list)
+  
+  # Initialize matrix
+  mirna_counts <- matrix(0, nrow = length(mirna_ids), ncol = length(sample_ids))
+  rownames(mirna_counts) <- mirna_ids
+  colnames(mirna_counts) <- sample_ids
+  
+  # Fill the matrix
+  for (sample_id in sample_ids) {
+    sample_counts <- mirna_counts_list[[sample_id]]
+    # Match miRNA IDs and fill counts
+    matched_ids <- match(mirna_ids, names(sample_counts))
+    mirna_counts[, sample_id] <- ifelse(is.na(matched_ids), 0, sample_counts[matched_ids])
+  }
+  
+  # Try to map UUIDs to TCGA sample IDs
+  log_info("Mapping file UUIDs to TCGA sample IDs...")
+  
+  # Use the file information to map UUIDs to sample IDs
+  if ("cases" %in% names(files_info)) {
+    # Extract sample IDs from the cases information
+    sample_mapping <- data.frame(
+      file_id = files_info$id,
+      sample_id = sapply(files_info$cases, function(x) {
+        if (length(x) > 0 && "samples" %in% names(x[[1]])) {
+          x[[1]]$samples[[1]]$submitter_id
+        } else {
+          NA
+        }
+      }),
+      stringsAsFactors = FALSE
+    )
+    
+    # Update column names where mapping is available
+    for (i in 1:nrow(sample_mapping)) {
+      if (!is.na(sample_mapping$sample_id[i])) {
+        col_idx <- which(colnames(mirna_counts) == sample_mapping$file_id[i])
+        if (length(col_idx) > 0) {
+          colnames(mirna_counts)[col_idx] <- sample_mapping$sample_id[i]
+        }
+      }
+    }
+    
+    # Create sample metadata
+    mirna_samples <- data.frame(
+      submitter_id = colnames(mirna_counts),
+      sample_type = "Primary Tumor",
+      stringsAsFactors = FALSE
+    )
+    rownames(mirna_samples) <- colnames(mirna_counts)
+    
+  } else {
+    # Fallback: use file IDs as sample IDs
+    log_warn("Could not map file UUIDs to sample IDs, using file IDs")
+    mirna_samples <- data.frame(
+      submitter_id = colnames(mirna_counts),
+      sample_type = "Primary Tumor",
+      stringsAsFactors = FALSE
+    )
+    rownames(mirna_samples) <- colnames(mirna_counts)
+  }
   
   return(list(counts = mirna_counts, samples = mirna_samples))
 }
 
+# Download miRNA data for breast cancer
+download_mirna_data <- function() {
+  operation_id <- log_operation_start("miRNA Data Download", "TCGA-BRCA miRNA Expression Quantification")
+  
+  # Check if processed data already exists
+  save_path <- file.path(multiomics_dir, "mirna_data.RData")
+  if (file.exists(save_path)) {
+    log_info("Found existing miRNA data, loading from file...")
+    load(save_path)
+    log_data_summary(mirna_counts, "miRNA counts matrix (loaded)")
+    log_data_summary(mirna_samples, "miRNA sample metadata (loaded)", "data.frame")
+    log_operation_end(operation_id, "Success (loaded existing data)")
+    return(list(counts = mirna_counts, samples = mirna_samples))
+  }
+  
+  result <- with_error_handling({
+    # Query miRNA data
+    log_info("Querying miRNA data from GDC...")
+    query_mirna <- GDCquery(
+      project = "TCGA-BRCA",
+      data.category = "Transcriptome Profiling",
+      data.type = "miRNA Expression Quantification"
+    )
+    
+    log_info("Found %d miRNA files for download", length(query_mirna$results[[1]]$id))
+    
+    # Download the data
+    log_info("Downloading miRNA data files...")
+    GDCdownload(query_mirna, method = "api", files.per.chunk = 10)
+    
+    # Process the individual miRNA files
+    log_info("Processing miRNA files...")
+    mirna_result <- process_mirna_files(query_mirna)
+    mirna_counts <- mirna_result$counts
+    mirna_samples <- mirna_result$samples
+    
+    log_data_summary(mirna_counts, "miRNA counts matrix")
+    log_data_summary(mirna_samples, "miRNA sample metadata", "data.frame")
+    
+    # Save data
+    save(mirna_counts, mirna_samples, file = save_path)
+    log_file_operation("saved", save_path, TRUE, "miRNA data")
+    
+    # Clean up temporary files
+    cleanup_temp_files()
+    
+    list(counts = mirna_counts, samples = mirna_samples)
+  }, "miRNA Data Download")
+  
+  log_operation_end(operation_id, if(!is.null(result)) "Success" else "Failed")
+  return(result)
+}
+
+# Helper function to clean up temporary download files
+cleanup_temp_files <- function() {
+  log_info("Cleaning up temporary download files...")
+  
+  # Pattern for temporary download files (UUID format)
+  temp_pattern <- "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+  
+  # Find all files matching the pattern
+  all_files <- list.files(".", full.names = FALSE)
+  temp_files <- all_files[grepl(temp_pattern, all_files)]
+  
+  if (length(temp_files) > 0) {
+    log_info("Found %d temporary files to clean up", length(temp_files))
+    
+    for (temp_file in temp_files) {
+      if (file.exists(temp_file)) {
+        # Check if it's a directory or file
+        if (file.info(temp_file)$isdir) {
+          unlink(temp_file, recursive = TRUE)
+        } else {
+          file.remove(temp_file)
+        }
+      }
+    }
+    
+    log_info("Cleaned up %d temporary files", length(temp_files))
+  } else {
+    log_info("No temporary files found to clean up")
+  }
+}
+
 # Download protein data for breast cancer
 download_protein_data <- function() {
-  cat("Downloading protein data for TCGA-BRCA...\n")
+  operation_id <- log_operation_start("Protein Data Download", "TCGA-BRCA Protein Expression Quantification")
   
-  # Query protein data
-  query_protein <- GDCquery(
-    project = "TCGA-BRCA",
-    data.category = "Proteome Profiling",
-    data.type = "Protein Expression Quantification"
-  )
+  # Check if processed data already exists
+  save_path <- file.path(multiomics_dir, "protein_data.RData")
+  if (file.exists(save_path)) {
+    log_info("Found existing protein data, loading from file...")
+    load(save_path)
+    log_data_summary(protein_matrix, "protein matrix (loaded)")
+    log_data_summary(protein_samples, "protein sample metadata (loaded)", "data.frame")
+    log_operation_end(operation_id, "Success (loaded existing data)")
+    return(list(matrix = protein_matrix, samples = protein_samples))
+  }
   
-  # Download the data
-  GDCdownload(query_protein, method = "api", files.per.chunk = 10)
+  result <- with_error_handling({
+    # Query protein data
+    log_info("Querying protein data from GDC...")
+    query_protein <- GDCquery(
+      project = "TCGA-BRCA",
+      data.category = "Proteome Profiling",
+      data.type = "Protein Expression Quantification"
+    )
+    
+    log_info("Found %d protein files for download", length(query_protein$results[[1]]$id))
+    
+    # Download the data
+    log_info("Downloading protein data files...")
+    GDCdownload(query_protein, method = "api", files.per.chunk = 10)
+    
+    # Prepare the data
+    log_info("Preparing protein data...")
+    protein_data <- GDCprepare(query_protein)
+    
+    # Check if protein_data is a SummarizedExperiment or data.frame
+    if (is(protein_data, "SummarizedExperiment")) {
+      log_info("Protein data returned as SummarizedExperiment, using assay() method")
+      # Extract protein matrix using assay() for SummarizedExperiment
+      protein_matrix <- assay(protein_data)
+      # Extract sample information
+      protein_samples <- as.data.frame(colData(protein_data))
+    } else if (is(protein_data, "data.frame")) {
+      # Handle data.frame format - protein data often comes as data.frame
+      log_info("Protein data returned as data.frame, processing accordingly...")
+      
+      # For protein data.frame, samples are usually columns and proteins are rows
+      # Find sample columns (typically start with TCGA- or are numeric/sample identifiers)
+      
+      # Look for column patterns that might be sample IDs
+      sample_cols <- grep("^TCGA-", colnames(protein_data), value = TRUE)
+      
+      if (length(sample_cols) == 0) {
+        # Try alternative patterns - numeric columns or columns with sample-like names
+        numeric_cols <- sapply(protein_data, is.numeric)
+        sample_cols <- names(numeric_cols)[numeric_cols]
+        
+        # Remove obvious metadata columns
+        metadata_patterns <- c("gene", "protein", "symbol", "id", "name", "description")
+        sample_cols <- sample_cols[!grepl(paste(metadata_patterns, collapse = "|"), 
+                                         sample_cols, ignore.case = TRUE)]
+      }
+      
+      log_info("Found %d potential sample columns in protein data", length(sample_cols))
+      
+      if (length(sample_cols) > 0) {
+        # Extract protein matrix
+        protein_matrix <- as.matrix(protein_data[, sample_cols])
+        
+        # Set row names - look for gene/protein identifier columns
+        if ("Gene" %in% colnames(protein_data)) {
+          rownames(protein_matrix) <- protein_data$Gene
+        } else if ("gene_name" %in% colnames(protein_data)) {
+          rownames(protein_matrix) <- protein_data$gene_name
+        } else if ("protein_id" %in% colnames(protein_data)) {
+          rownames(protein_matrix) <- protein_data$protein_id
+        } else {
+          # Use row numbers if no identifier column found
+          rownames(protein_matrix) <- paste0("protein_", 1:nrow(protein_matrix))
+        }
+        
+        # Create sample information data.frame
+        protein_samples <- data.frame(
+          submitter_id = colnames(protein_matrix),
+          sample_type = "Primary Tumor",  # Default for TCGA-BRCA
+          stringsAsFactors = FALSE
+        )
+        rownames(protein_samples) <- colnames(protein_matrix)
+        
+      } else {
+        stop("Could not identify sample columns in protein data")
+      }
+      
+    } else {
+      stop("Unexpected data format for protein data: ", class(protein_data))
+    }
+    
+    log_data_summary(protein_matrix, "protein matrix")
+    log_data_summary(protein_samples, "protein sample metadata", "data.frame")
+    
+    # Save data
+    save(protein_matrix, protein_samples, file = save_path)
+    log_file_operation("saved", save_path, TRUE, "protein data")
+    
+    # Clean up temporary files
+    cleanup_temp_files()
+    
+    list(matrix = protein_matrix, samples = protein_samples)
+  }, "Protein Data Download")
   
-  # Prepare the data
-  protein_data <- GDCprepare(query_protein)
-  
-  # Extract protein matrix
-  protein_matrix <- assay(protein_data)
-  
-  # Extract sample information
-  protein_samples <- as.data.frame(colData(protein_data))
-  
-  # Save data
-  save(protein_matrix, protein_samples, file = file.path(multiomics_dir, "protein_data.RData"))
-  cat("Protein data downloaded and saved.\n")
-  
-  return(list(matrix = protein_matrix, samples = protein_samples))
+  log_operation_end(operation_id, if(!is.null(result)) "Success" else "Failed")
+  return(result)
 }
 
 # Get breast cancer subtype information

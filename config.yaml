@@ -179,6 +179,37 @@ paths:
   plots_dir: "results/plots"
   tables_dir: "results/tables"
   src_dir: "src"
+  logs_dir: "logs"
+
+# Logging Configuration
+logging:
+  # Logging level (DEBUG, INFO, WARN, ERROR)
+  level: "INFO"
+  
+  # Log to file
+  file_output: true
+  
+  # Log to console
+  console_output: true
+  
+  # Log file naming pattern
+  file_pattern: "tcga_pipeline_%Y%m%d_%H%M%S.log"
+  
+  # Log format
+  format: "[%Y-%m-%d %H:%M:%S] [%level] %message"
+  
+  # Log rotation
+  rotate_logs: true
+  max_log_files: 10
+  
+  # Performance monitoring
+  performance_monitoring: true
+  
+  # Error handling
+  error_handling:
+    continue_on_error: false
+    retry_attempts: 3
+    retry_delay: 5  # seconds
 
 # R Environment
 r_environment:
@@ -204,6 +235,7 @@ r_environment:
       - "corrplot"    # Correlation plots
       - "circlize"    # Circular plots
       - "yaml"        # Configuration file reading
+      - "futile.logger"  # Structured logging
       
   # Multi-omics specific packages
   multiomics_packages:

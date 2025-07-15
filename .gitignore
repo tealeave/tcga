@@ -46,6 +46,8 @@ renv/
 .Rhistory
 .RData
 .Ruserdata
+CLAUDE.md
+GEMINI.md
 
 # Data files (raw TCGA data can be large)
 data/
@@ -72,3 +74,7 @@ __pycache__/
 # Temporary files
 *.tmp
 *.log
+
+# Large files
+GDCdata/
+data/
