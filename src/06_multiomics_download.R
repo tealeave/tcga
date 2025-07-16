@@ -257,27 +257,42 @@ cleanup_temp_files <- function() {
   # Pattern for temporary download files (UUID format)
   temp_pattern <- "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
   
-  # Find all files matching the pattern
-  all_files <- list.files(".", full.names = FALSE)
-  temp_files <- all_files[grepl(temp_pattern, all_files)]
+  # Find all files and directories matching the pattern in current directory
+  all_items <- list.files(".", full.names = FALSE, include.dirs = TRUE)
+  temp_items <- all_items[grepl(temp_pattern, all_items)]
   
-  if (length(temp_files) > 0) {
-    log_info("Found %d temporary files to clean up", length(temp_files))
+  # Also check for .tar.gz files that might be left over
+  temp_tar_files <- list.files(".", pattern = ".*_[0-9]+\\.tar\\.gz$", full.names = FALSE)
+  
+  all_temp_items <- c(temp_items, temp_tar_files)
+  
+  if (length(all_temp_items) > 0) {
+    log_info("Found %d temporary items to clean up", length(all_temp_items))
     
-    for (temp_file in temp_files) {
-      if (file.exists(temp_file)) {
+    cleaned_count <- 0
+    for (temp_item in all_temp_items) {
+      if (file.exists(temp_item)) {
         # Check if it's a directory or file
-        if (file.info(temp_file)$isdir) {
-          unlink(temp_file, recursive = TRUE)
+        if (file.info(temp_item)$isdir) {
+          unlink(temp_item, recursive = TRUE, force = TRUE)
+          if (!file.exists(temp_item)) cleaned_count <- cleaned_count + 1
         } else {
-          file.remove(temp_file)
+          file.remove(temp_item)
+          if (!file.exists(temp_item)) cleaned_count <- cleaned_count + 1
         }
       }
     }
     
-    log_info("Cleaned up %d temporary files", length(temp_files))
+    log_info("Successfully cleaned up %d temporary items", cleaned_count)
   } else {
     log_info("No temporary files found to clean up")
+  }
+  
+  # Also clean up any .tmp files in the current directory
+  tmp_files <- list.files(".", pattern = "\\.tmp$", full.names = FALSE)
+  if (length(tmp_files) > 0) {
+    file.remove(tmp_files)
+    log_info("Cleaned up %d .tmp files", length(tmp_files))
   }
 }
 
@@ -394,99 +409,174 @@ download_protein_data <- function() {
   return(result)
 }
 
-# Get breast cancer subtype information
+
+
+# Fixed get_subtype_info function
 get_subtype_info <- function() {
-  cat("Downloading breast cancer subtype information...\n")
+  operation_id <- log_operation_start("Subtype Data Download", "TCGA-BRCA Subtype Information")
   
-  # Query clinical data
-  query_clinical <- GDCquery(
-    project = "TCGA-BRCA",
-    data.category = "Clinical",
-    data.type = "Clinical Supplement",
-    data.format = "BCR XML"
-  )
+  # Check if subtype data already exists
+  save_path <- file.path(multiomics_dir, "subtype_info.RData")
+  if (file.exists(save_path)) {
+    log_info("Found existing subtype data, loading from file...")
+    load(save_path)
+    log_data_summary(subtype_info, "subtype information (loaded)", "data.frame")
+    log_operation_end(operation_id, "Success (loaded existing data)")
+    return(subtype_info)
+  }
+
+  result <- with_error_handling({
+    # Use the dedicated function to get curated subtype data
+    log_info("Downloading subtype data from PanCancerAtlas...")
+    tcga_subtypes <- TCGAbiolinks::PanCancerAtlas_subtypes()
+    
+    # First, let's examine the structure to understand available columns
+    log_info("Available columns in subtype data: %s", paste(colnames(tcga_subtypes), collapse = ", "))
+    
+    # Filter for breast cancer (BRCA) first
+    brca_subtypes <- tcga_subtypes[tcga_subtypes$cancer.type == "BRCA", ]
+    log_info("Found %d BRCA samples in subtype data", nrow(brca_subtypes))
+    
+    # Check available columns and select appropriate ones
+    available_cols <- colnames(brca_subtypes)
+    
+    # Look for sample ID column (common names)
+    sample_id_col <- NULL
+    for (col_name in c("pan.samplesID", "sample", "sampleID", "submitter_id")) {
+      if (col_name %in% available_cols) {
+        sample_id_col <- col_name
+        break
+      }
+    }
+    
+    # Look for subtype column (common names)
+    subtype_col <- NULL
+    for (col_name in c("Subtype_Selected", "subtype", "SUBTYPE", "molecular_subtype")) {
+      if (col_name %in% available_cols) {
+        subtype_col <- col_name
+        break
+      }
+    }
+    
+    if (is.null(sample_id_col) || is.null(subtype_col)) {
+      log_warn("Could not find expected columns. Available columns: %s", paste(available_cols, collapse = ", "))
+      stop("Required columns not found in subtype data")
+    }
+    
+    log_info("Using sample ID column: %s", sample_id_col)
+    log_info("Using subtype column: %s", subtype_col)
+    
+    # Select and rename columns using standard R syntax
+    subtype_info <- brca_subtypes[, c(sample_id_col, subtype_col)]
+    colnames(subtype_info) <- c("patient_id", "subtype")
+    
+    # Filter out missing subtypes
+    subtype_info <- subtype_info[!is.na(subtype_info$subtype) & subtype_info$subtype != "", ]
+    
+    # Convert patient IDs to 12-character format (TCGA-XX-XXXX)
+    subtype_info$patient_id <- substr(subtype_info$patient_id, 1, 12)
+    
+    # Remove duplicate patient IDs (keep first occurrence)
+    subtype_info <- subtype_info[!duplicated(subtype_info$patient_id), ]
+    
+    # Convert to data.frame and set row names
+    subtype_info <- as.data.frame(subtype_info)
+    rownames(subtype_info) <- subtype_info$patient_id
+    
+    log_data_summary(subtype_info, "subtype information", "data.frame")
+    log_info("Subtype distribution: %s", paste(names(table(subtype_info$subtype)), "=", table(subtype_info$subtype), collapse = ", "))
+    
+    # Save the cleaned subtype information
+    save(subtype_info, file = save_path)
+    log_file_operation("saved", save_path, TRUE, "subtype data")
+    
+    subtype_info
+  }, "Subtype Data Download")
   
-  # Download clinical data
-  GDCdownload(query_clinical)
-  
-  # Prepare clinical data
-  clinical_data <- GDCprepare(query_clinical)
-  
-  # Extract subtype information
-  subtype_info <- clinical_data %>%
-    select(submitter_id, paper_BRCA_Subtype_PAM50) %>%
-    filter(!is.na(paper_BRCA_Subtype_PAM50)) %>%
-    rename(
-      sample_id = submitter_id,
-      subtype = paper_BRCA_Subtype_PAM50
-    )
-  
-  # Save subtype information
-  save(subtype_info, file = file.path(multiomics_dir, "subtype_info.RData"))
-  cat("Subtype information downloaded and saved.\n")
-  
-  return(subtype_info)
+  log_operation_end(operation_id, if(!is.null(result)) "Success" else "Failed")
+  return(result)
 }
+
 
 # Create training and test sets following DIABLO methodology
 create_train_test_sets <- function(mrna_data, mirna_data, protein_data, subtype_info) {
   cat("Creating training and test sets...\n")
   
-  # Get common samples across all data types
-  common_samples <- intersect(
-    intersect(colnames(mrna_data$counts), colnames(mirna_data$counts)),
-    colnames(protein_data$matrix)
+  # Extract patient barcodes from sample barcodes (assume TCGA format: first 12 characters)
+  mrna_patients <- substr(colnames(mrna_data$counts), 1, 12)
+  mirna_patients <- substr(colnames(mirna_data$counts), 1, 12)
+  protein_patients <- substr(colnames(protein_data$matrix), 1, 12)
+  
+  # Get common patients across all data types
+  common_patients <- intersect(intersect(mrna_patients, mirna_patients), protein_patients)
+  
+  # Filter subtype info for common patients
+  available_subtypes <- subtype_info[subtype_info$patient_id %in% common_patients, ]
+  
+  # Focus on main subtypes: Basal, Her2, LumA (with BRCA. prefix)
+  main_subtypes <- available_subtypes[available_subtypes$subtype %in% c("BRCA.Basal", "BRCA.Her2", "BRCA.LumA"), ]
+  
+  # Create training set (150 patients, 50 per subtype)
+  set.seed(42)  # For reproducibility
+  train_patients <- main_subtypes %>%
+    group_by(subtype) %>%
+    sample_n(min(50, n())) %>%  # 50 patients per subtype, or all if fewer
+    ungroup() %>%
+    pull(patient_id)
+  
+  # Map back to samples (filter samples belonging to these patients)
+  train_samples <- colnames(mrna_data$counts)[mrna_patients %in% train_patients]
+  
+  # Create test set (up to 75 patients, ~25 per subtype, with only mRNA and miRNA)
+  remaining_patients <- setdiff(main_subtypes$patient_id, train_patients)
+  test_patients <- main_subtypes %>%
+    filter(patient_id %in% remaining_patients) %>%
+    group_by(subtype) %>%
+    sample_n(min(25, n())) %>%
+    ungroup() %>%
+    pull(patient_id)
+  
+  test_samples <- colnames(mrna_data$counts)[mrna_patients %in% test_patients]
+  
+  # Map subtypes back to samples (repeat patient subtype for each sample)
+  train_subtypes <- data.frame(
+    sample_id = train_samples,
+    subtype = main_subtypes$subtype[match(substr(train_samples, 1, 12), main_subtypes$patient_id)]
   )
   
-  # Filter subtype info for common samples
-  available_subtypes <- subtype_info[subtype_info$sample_id %in% common_samples, ]
-  
-  # Focus on main subtypes: Basal, Her2, LumA
-  main_subtypes <- available_subtypes[available_subtypes$subtype %in% c("Basal", "Her2", "LumA"), ]
-  
-  # Create training set (150 samples with all three data types)
-  set.seed(42)  # For reproducibility
-  train_samples <- main_subtypes %>%
-    group_by(subtype) %>%
-    sample_n(50) %>%  # 50 samples per subtype
-    ungroup() %>%
-    pull(sample_id)
-  
-  # Create test set (70 samples with only mRNA and miRNA)
-  remaining_samples <- main_subtypes[!main_subtypes$sample_id %in% train_samples, ]
-  test_samples <- remaining_samples %>%
-    group_by(subtype) %>%
-    sample_n(min(25, n())) %>%  # Up to 25 samples per subtype
-    ungroup() %>%
-    pull(sample_id)
+  test_subtypes <- data.frame(
+    sample_id = test_samples,
+    subtype = main_subtypes$subtype[match(substr(test_samples, 1, 12), main_subtypes$patient_id)]
+  )
   
   # Create training data
   train_data <- list(
     mrna = mrna_data$counts[, train_samples],
     mirna = mirna_data$counts[, train_samples],
     protein = protein_data$matrix[, train_samples],
-    subtypes = main_subtypes[main_subtypes$sample_id %in% train_samples, ]
+    subtypes = train_subtypes
   )
   
   # Create test data (missing protein data)
   test_data <- list(
     mrna = mrna_data$counts[, test_samples],
     mirna = mirna_data$counts[, test_samples],
-    protein = NULL,  # Missing protein data as in the blog post
-    subtypes = main_subtypes[main_subtypes$sample_id %in% test_samples, ]
+    protein = NULL,  # Missing protein data as in the DIABLO methodology
+    subtypes = test_subtypes
   )
   
   # Save training and test sets
   save(train_data, file = file.path(multiomics_dir, "train_data.RData"))
   save(test_data, file = file.path(multiomics_dir, "test_data.RData"))
   
-  cat("Training set created with", length(train_samples), "samples\n")
-  cat("Test set created with", length(test_samples), "samples\n")
+  cat("Training set created with", length(train_samples), "samples (", length(train_patients), "patients)\n")
+  cat("Test set created with", length(test_samples), "samples (", length(test_patients), "patients)\n")
   cat("Training subtypes:", table(train_data$subtypes$subtype), "\n")
   cat("Test subtypes:", table(test_data$subtypes$subtype), "\n")
   
   return(list(train = train_data, test = test_data))
 }
+
 
 # Main execution
 cat("=== Multi-omics Data Download ===\n")
