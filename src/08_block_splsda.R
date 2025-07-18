@@ -21,7 +21,7 @@ tune_block_splsda_components <- function(X, Y, design, validation = "Mfold",
   cat("Tuning number of components for Block sPLS-DA...\n")
   
   # Perform cross-validation to select optimal number of components
-  tune_result <- tune(
+  tune_result <- tune.block.splsda(
     X = X,
     Y = Y,
     ncomp = max_comp,

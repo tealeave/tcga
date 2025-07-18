@@ -502,19 +502,48 @@ get_subtype_info <- function() {
 create_train_test_sets <- function(mrna_data, mirna_data, protein_data, subtype_info) {
   cat("Creating training and test sets...\n")
   
+  # Log data dimensions after loading
+  log_info("Data loaded - mRNA: %dx%d, miRNA: %dx%d, protein: %dx%d", 
+           nrow(mrna_data$counts), ncol(mrna_data$counts),
+           nrow(mirna_data$counts), ncol(mirna_data$counts), 
+           nrow(protein_data$matrix), ncol(protein_data$matrix))
+  
   # Extract patient barcodes from sample barcodes (assume TCGA format: first 12 characters)
+  
+  # Log actual sample names to understand naming patterns
+  log_info("Sample mRNA names (first 5): %s", paste(head(colnames(mrna_data$counts), 5), collapse=", "))
+  log_info("Sample miRNA names (first 5): %s", paste(head(colnames(mirna_data$counts), 5), collapse=", "))
+  log_info("Sample protein names (first 5): %s", paste(head(colnames(protein_data$matrix), 5), collapse=", "))
+  
   mrna_patients <- substr(colnames(mrna_data$counts), 1, 12)
   mirna_patients <- substr(colnames(mirna_data$counts), 1, 12)
   protein_patients <- substr(colnames(protein_data$matrix), 1, 12)
   
+  # Log extracted patient IDs to verify extraction logic
+  log_info("Extracted mRNA patient IDs (first 5): %s", paste(head(unique(mrna_patients), 5), collapse=", "))
+  log_info("Extracted miRNA patient IDs (first 5): %s", paste(head(unique(mirna_patients), 5), collapse=", "))
+  log_info("Extracted protein patient IDs (first 5): %s", paste(head(unique(protein_patients), 5), collapse=", "))
+  
   # Get common patients across all data types
   common_patients <- intersect(intersect(mrna_patients, mirna_patients), protein_patients)
+  
+  # Log patient extraction results
+  log_info("Patients extracted - mRNA: %d, miRNA: %d, protein: %d, common: %d", 
+           length(unique(mrna_patients)), length(unique(mirna_patients)), 
+           length(unique(protein_patients)), length(common_patients))
   
   # Filter subtype info for common patients
   available_subtypes <- subtype_info[subtype_info$patient_id %in% common_patients, ]
   
+  # Log available subtypes before filtering
+  log_info("Available subtypes: %s", paste(unique(available_subtypes$subtype), collapse=", "))
+  log_info("Patients with subtype info: %d", nrow(available_subtypes))
+  
   # Focus on main subtypes: Basal, Her2, LumA (with BRCA. prefix)
   main_subtypes <- available_subtypes[available_subtypes$subtype %in% c("BRCA.Basal", "BRCA.Her2", "BRCA.LumA"), ]
+  
+  # Log filtering results
+  log_info("Patients after main subtype filtering: %d", nrow(main_subtypes))
   
   # Create training set (150 patients, 50 per subtype)
   set.seed(42)  # For reproducibility
@@ -571,6 +600,10 @@ create_train_test_sets <- function(mrna_data, mirna_data, protein_data, subtype_
   
   cat("Training set created with", length(train_samples), "samples (", length(train_patients), "patients)\n")
   cat("Test set created with", length(test_samples), "samples (", length(test_patients), "patients)\n")
+  
+  # Log final results
+  log_info("Created training set: %d samples (%d patients)", length(train_samples), length(train_patients))
+  log_info("Created test set: %d samples (%d patients)", length(test_samples), length(test_patients))
   cat("Training subtypes:", table(train_data$subtypes$subtype), "\n")
   cat("Test subtypes:", table(test_data$subtypes$subtype), "\n")
   
