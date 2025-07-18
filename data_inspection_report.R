@@ -43,7 +43,7 @@ tryCatch({
   cat("ERROR loading mRNA data:", e$message, "\n")
 })
 
-cat("\n" %>% strrep("=", 80) %>% "\n\n")
+cat("\n", strrep("=", 80), "\n\n")
 
 # =============================================================================
 # 2. miRNA DATA INSPECTION
@@ -74,7 +74,7 @@ tryCatch({
   cat("ERROR loading miRNA data:", e$message, "\n")
 })
 
-cat("\n" %>% strrep("=", 80) %>% "\n\n")
+cat("\n", strrep("=", 80), "\n\n")
 
 # =============================================================================
 # 3. PROTEIN DATA INSPECTION
@@ -102,7 +102,7 @@ tryCatch({
   cat("ERROR loading protein data:", e$message, "\n")
 })
 
-cat("\n" %>% strrep("=", 80) %>% "\n\n")
+cat("\n", strrep("=", 80), "\n\n")
 
 # =============================================================================
 # 4. SUBTYPE DATA INSPECTION
@@ -130,7 +130,7 @@ tryCatch({
   cat("ERROR loading subtype data:", e$message, "\n")
 })
 
-cat("\n" %>% strrep("=", 80) %>% "\n\n")
+cat("\n", strrep("=", 80), "\n\n")
 
 # =============================================================================
 # 5. PATIENT OVERLAP ANALYSIS
@@ -208,9 +208,9 @@ tryCatch({
   cat("ERROR in overlap analysis:", e$message, "\n")
 })
 
-cat("\n" %>% strrep("=", 80) %>% "\n")
+cat("\n", strrep("=", 80), "\n")
 cat("END OF REPORT\n")
-cat("=" %>% strrep("=", 80) %>% "\n")
+cat(strrep("=", 80), "\n")
 
 sink()
 

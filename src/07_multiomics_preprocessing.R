@@ -8,6 +8,10 @@ suppressMessages({
   library(mixOmics)
 })
 
+# Simple global output capture
+sink("logs/tcga_pipeline_output.log", append = TRUE)
+sink("logs/tcga_pipeline_output.log", type = "message", append = TRUE)
+
 cat("Loading multi-omics preprocessing functions...\n")
 
 # Load the downloaded multi-omics data
@@ -113,6 +117,82 @@ preprocess_protein <- function(protein_matrix) {
   return(protein_scaled)
 }
 
+# Function to harmonize sample names across omics types
+harmonize_sample_names <- function(data_list, subtype_info) {
+  log_info("Harmonizing sample names across omics types...")
+  
+  # Extract patient IDs from sample barcodes
+  extract_patient_id <- function(sample_barcode) {
+    # Extract patient ID (TCGA-XX-XXXX format)
+    if (grepl("^TCGA-[A-Z0-9]{2}-[A-Z0-9]{4}", sample_barcode)) {
+      return(substr(sample_barcode, 1, 12))
+    } else {
+      return(sample_barcode)  # fallback
+    }
+  }
+  
+  # Create mapping from original sample names to patient IDs
+  sample_mapping <- list()
+  
+  for (block_name in names(data_list)) {
+    if (!is.null(data_list[[block_name]])) {
+      original_names <- colnames(data_list[[block_name]])
+      patient_ids <- sapply(original_names, extract_patient_id)
+      sample_mapping[[block_name]] <- data.frame(
+        original_name = original_names,
+        patient_id = patient_ids,
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+  
+  # Find common patient IDs across all omics types
+  all_patient_ids <- lapply(sample_mapping, function(x) unique(x$patient_id))
+  common_patients <- Reduce(intersect, all_patient_ids)
+  
+  log_info("Found %d common patients across all omics types", length(common_patients))
+  
+  # Harmonize data matrices to use patient-level sample names
+  harmonized_data <- list()
+  for (block_name in names(data_list)) {
+    if (!is.null(data_list[[block_name]])) {
+      # Map original sample names to patient IDs
+      mapping <- sample_mapping[[block_name]]
+      
+      # Keep only samples from common patients
+      keep_samples <- mapping$patient_id %in% common_patients
+      filtered_data <- data_list[[block_name]][, keep_samples]
+      
+      # Rename columns to use patient IDs
+      new_names <- mapping$patient_id[keep_samples]
+      colnames(filtered_data) <- new_names
+      
+      harmonized_data[[block_name]] <- filtered_data
+      
+      log_info("Harmonized %s: %d samples (%d unique patients)", 
+               block_name, ncol(filtered_data), length(unique(new_names)))
+    }
+  }
+  
+  # Update subtype info to use patient IDs
+  harmonized_subtypes <- subtype_info
+  harmonized_subtypes$sample_id <- sapply(harmonized_subtypes$sample_id, extract_patient_id)
+  
+  # Filter to only include common patients
+  harmonized_subtypes <- harmonized_subtypes[harmonized_subtypes$sample_id %in% common_patients, ]
+  
+  # Remove duplicates (keep first occurrence per patient)
+  harmonized_subtypes <- harmonized_subtypes[!duplicated(harmonized_subtypes$sample_id), ]
+  
+  log_info("Harmonized subtypes: %d patients with subtype info", nrow(harmonized_subtypes))
+  
+  return(list(
+    data = harmonized_data,
+    subtypes = harmonized_subtypes,
+    sample_mapping = sample_mapping
+  ))
+}
+
 # Function to create design matrix for DIABLO
 create_design_matrix <- function(n_blocks) {
   cat("Creating design matrix for DIABLO...\n")
@@ -132,34 +212,39 @@ create_design_matrix <- function(n_blocks) {
   return(design)
 }
 
-# Function to match samples across data types
+
 match_samples <- function(data_list, subtype_info) {
-  cat("Matching samples across data types...\n")
+  log_info("Matching samples across data types...")
   
-  # Get common samples
-  sample_names <- colnames(data_list[[1]])
-  for (i in 2:length(data_list)) {
-    if (!is.null(data_list[[i]])) {
-      sample_names <- intersect(sample_names, colnames(data_list[[i]]))
+  # First harmonize sample names to use patient-level identifiers
+  harmonized_result <- harmonize_sample_names(data_list, subtype_info)
+  
+  # Verify that all data types have the same sample names
+  sample_names <- NULL
+  for (block_name in names(harmonized_result$data)) {
+    if (!is.null(harmonized_result$data[[block_name]])) {
+      current_names <- colnames(harmonized_result$data[[block_name]])
+      if (is.null(sample_names)) {
+        sample_names <- current_names
+      } else if (!identical(sample_names, current_names)) {
+        log_error("Sample name mismatch detected after harmonization: %s vs %s", 
+                 head(sample_names, 3), head(current_names, 3))
+        stop("Sample name harmonization failed")
+      }
     }
   }
   
-  # Filter all data types for common samples
-  matched_data <- list()
-  for (i in 1:length(data_list)) {
-    if (!is.null(data_list[[i]])) {
-      matched_data[[i]] <- data_list[[i]][, sample_names]
-    } else {
-      matched_data[[i]] <- NULL
-    }
+  # Verify subtype alignment
+  subtype_samples <- harmonized_result$subtypes$sample_id
+  if (!identical(sort(sample_names), sort(subtype_samples))) {
+    log_error("Subtype samples do not match harmonized data samples")
+    log_error("Data samples: %s", paste(head(sample_names, 5), collapse=", "))
+    log_error("Subtype samples: %s", paste(head(subtype_samples, 5), collapse=", "))
+    stop("Sample alignment failed")
   }
-  names(matched_data) <- names(data_list)
   
-  # Filter subtype info for common samples
-  matched_subtypes <- subtype_info[subtype_info$sample_id %in% sample_names, ]
-  
-  cat("Matched", length(sample_names), "samples across data types\n")
-  return(list(data = matched_data, subtypes = matched_subtypes))
+  log_info("Successfully matched %d samples across all data types", length(sample_names))
+  return(list(data = harmonized_result$data, subtypes = harmonized_result$subtypes))
 }
 
 # Main preprocessing function
@@ -202,6 +287,69 @@ preprocess_multiomics_data <- function(raw_data, dataset_name) {
   Y <- as.factor(matched_result$subtypes$subtype)
   names(Y) <- matched_result$subtypes$sample_id
   
+  # DEBUG: Log data before transposing (with harmonized names)
+  log_info("=== DEBUG: Before Transposing (Harmonized) ===")
+  for (block_name in names(matched_result$data)) {
+    if (!is.null(matched_result$data[[block_name]])) {
+      log_info("%s data (features x samples): dimensions %dx%d", 
+               block_name, 
+               nrow(matched_result$data[[block_name]]), 
+               ncol(matched_result$data[[block_name]]))
+      log_info("First 5 rows x 5 cols:\n%s", 
+               paste(capture.output(head(matched_result$data[[block_name]][1:5, 1:5])), collapse="\n"))
+      log_info("Column names (samples, first 10): %s", 
+               paste(head(colnames(matched_result$data[[block_name]]), 10), collapse=", "))
+      log_info("Row names (features, first 10): %s", 
+               paste(head(rownames(matched_result$data[[block_name]]), 10), collapse=", "))
+    }
+  }
+
+  # Prepare final data for mixOmics
+  final_data <- list()
+  for (block_name in names(matched_result$data)) {
+    if (!is.null(matched_result$data[[block_name]])) {
+      # Transpose for mixOmics (samples as rows, features as columns)
+      final_data[[block_name]] <- t(matched_result$data[[block_name]])
+      
+      # DEBUG: Log data after transposing (with harmonized names)
+      log_info("=== DEBUG: After Transposing %s (Harmonized) ===", block_name)
+      log_info("Dimensions: %dx%d", nrow(final_data[[block_name]]), ncol(final_data[[block_name]]))
+      log_info("First 5 rows x 5 cols:\n%s", 
+               paste(capture.output(head(final_data[[block_name]][1:5, 1:5])), collapse="\n"))
+      log_info("Row names (samples, first 10): %s", 
+               paste(head(rownames(final_data[[block_name]]), 10), collapse=", "))
+      log_info("Column names (features, first 10): %s", 
+               paste(head(colnames(final_data[[block_name]]), 10), collapse=", "))
+    }
+  }
+
+  # Create outcome vector
+  Y <- as.factor(matched_result$subtypes$subtype)
+  names(Y) <- matched_result$subtypes$sample_id
+  
+  # DEBUG: Log outcome vector information
+  log_info("=== DEBUG: Outcome Vector (Harmonized) ===")
+  log_info("Y vector length: %d", length(Y))
+  log_info("Y names (samples, first 10): %s", 
+           paste(head(names(Y), 10), collapse=", "))
+  log_info("Y levels: %s", paste(levels(Y), collapse=", "))
+  log_info("Y distribution:\n%s", paste(capture.output(table(Y)), collapse="\n"))
+  
+  # DEBUG: Check row name alignment across all blocks
+  log_info("=== DEBUG: Sample Alignment Check (Harmonized) ===")
+  for (block_name in names(final_data)) {
+    if (!is.null(final_data[[block_name]])) {
+      match_status <- all(rownames(final_data[[block_name]]) == names(Y))
+      log_info("%s row names match Y names: %s", block_name, match_status)
+      if (!match_status) {
+        log_error("Mismatch detected! Sample names do not align")
+        log_error("Data samples: %s", paste(head(rownames(final_data[[block_name]]), 5), collapse=", "))
+        log_error("Y samples: %s", paste(head(names(Y), 5), collapse=", "))
+        stop("Sample alignment verification failed")
+      }
+    }
+  }
+
   return(list(
     X = final_data,
     Y = Y,
@@ -214,13 +362,66 @@ preprocess_multiomics_data <- function(raw_data, dataset_name) {
 cat("Processing training data...\n")
 train_processed <- preprocess_multiomics_data(train_data, "training")
 
-# Process test data
-cat("Processing test data...\n")
+# DEBUG: Print training processed data structure
+save(train_processed, file = file.path(multiomics_dir, "train_processed.RData"))
 test_processed <- preprocess_multiomics_data(test_data, "test")
 
-# Save processed data
-save(train_processed, file = file.path(multiomics_dir, "train_processed.RData"))
-save(test_processed, file = file.path(multiomics_dir, "test_processed.RData"))
+# DEBUG: Log processed data structures
+log_info("=== DEBUG: Training Processed Data ===")
+for (block_name in names(train_processed$X)) {
+  if (!is.null(train_processed$X[[block_name]])) {
+    log_data_summary(train_processed$X[[block_name]], paste(block_name, "training data"), "matrix")
+    log_info("First 5 rows x 5 cols:\n%s", 
+             paste(capture.output(head(train_processed$X[[block_name]][1:5, 1:5])), collapse="\n"))
+    log_info("Row names (samples, first 10): %s", 
+             paste(head(rownames(train_processed$X[[block_name]]), 10), collapse=", "))
+  }
+}
+
+log_info("=== DEBUG: Test Processed Data ===")
+for (block_name in names(test_processed$X)) {
+  if (!is.null(test_processed$X[[block_name]])) {
+    log_data_summary(test_processed$X[[block_name]], paste(block_name, "test data"), "matrix")
+    log_info("First 5 rows x 5 cols:\n%s", 
+             paste(capture.output(head(test_processed$X[[block_name]][1:5, 1:5])), collapse="\n"))
+    log_info("Row names (samples, first 10): %s", 
+             paste(head(rownames(test_processed$X[[block_name]]), 10), collapse=", "))
+  }
+}
+
+# DEBUG: Cross-validation of sample alignment
+log_info("=== DEBUG: Final Sample Alignment (Harmonized) ===")
+log_info("Training Y names vs X row names:")
+for (block_name in names(train_processed$X)) {
+  if (!is.null(train_processed$X[[block_name]])) {
+    match_status <- all(rownames(train_processed$X[[block_name]]) == names(train_processed$Y))
+    log_info("  %s: %s", block_name, match_status)
+    if (!match_status) {
+      log_error("Training set alignment issue detected in %s", block_name)
+      log_error("  Data samples: %s", paste(head(rownames(train_processed$X[[block_name]]), 3), collapse=", "))
+      log_error("  Y samples: %s", paste(head(names(train_processed$Y), 3), collapse=", "))
+      stop("Training set alignment verification failed")
+    }
+  }
+}
+
+log_info("Test Y names vs X row names:")
+for (block_name in names(test_processed$X)) {
+  if (!is.null(test_processed$X[[block_name]])) {
+    match_status <- all(rownames(test_processed$X[[block_name]]) == names(test_processed$Y))
+    log_info("  %s: %s", block_name, match_status)
+    if (!match_status) {
+      log_error("Test set alignment issue detected in %s", block_name)
+      log_error("  Data samples: %s", paste(head(rownames(test_processed$X[[block_name]]), 3), collapse=", "))
+      log_error("  Y samples: %s", paste(head(names(test_processed$Y), 3), collapse=", "))
+      stop("Test set alignment verification failed")
+    }
+  }
+}
+
+log_info("=== Sample Name Harmonization Summary ===")
+log_info("All omics blocks now use consistent patient-level sample names")
+log_info("Block sPLS-DA requirements for sample name alignment should be satisfied")
 
 # Create summary statistics
 create_preprocessing_summary <- function(processed_data, dataset_name) {
@@ -274,3 +475,7 @@ cat("  Outcome distribution:", paste(names(test_summary$outcome),
                                    test_summary$outcome, sep = "=", collapse = ", "), "\n")
 
 cat("Multi-omics preprocessing completed successfully!\n")
+
+# Close output capture
+sink(type = "output")
+sink(type = "message")

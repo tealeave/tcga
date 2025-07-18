@@ -6,7 +6,12 @@ suppressMessages({
   library(dplyr)
   library(ggplot2)
   library(RColorBrewer)
+  library(BiocParallel)
 })
+
+# Simple global output capture
+sink("logs/tcga_pipeline_output.log", append = TRUE)
+sink("logs/tcga_pipeline_output.log", type = "message", append = TRUE)
 
 cat("Loading Block sPLS-DA analysis functions...\n")
 
@@ -15,13 +20,44 @@ multiomics_dir <- file.path(data_dir, "multiomics")
 load(file.path(multiomics_dir, "train_processed.RData"))
 load(file.path(multiomics_dir, "test_processed.RData"))
 
+# Function to detect available cores in HPC environment
+detect_hpc_cores <- function() {
+  # Check SLURM environment
+  if (Sys.getenv("SLURM_CPUS_PER_TASK") != "") {
+    return(as.integer(Sys.getenv("SLURM_CPUS_PER_TASK")))
+  }
+  # Check PBS environment  
+  if (Sys.getenv("PBS_NP") != "") {
+    return(as.integer(Sys.getenv("PBS_NP")))
+  }
+  # Check SGE environment
+  if (Sys.getenv("NSLOTS") != "") {
+    return(as.integer(Sys.getenv("NSLOTS")))
+  }
+  # Default to 32 for explicit user request
+  return(32)
+}
+
 # Function to determine optimal number of components
 tune_block_splsda_components <- function(X, Y, design, validation = "Mfold", 
-                                       folds = 5, nrepeat = 10, max_comp = 5) {
-  cat("Tuning number of components for Block sPLS-DA...\n")
+                                       folds = 5, nrepeat = 10, max_comp = 5, 
+                                       workers = NULL) {
+  
+  if (is.null(workers)) {
+    workers <- detect_hpc_cores()
+  }
+  
+  cat("Tuning number of components for Block sPLS-DA using", workers, "cores...\n")
+  
+  # Set up parallel backend with logging
+  BPPARAM <- create_logged_bppar(workers)
+  
+  # Reduce parameters for faster tuning
+  folds <- min(folds, 3)  # Use 3-fold CV for speed
+  nrepeat <- min(nrepeat, 3)  # Use 3 repeats for initial tuning
   
   # Perform cross-validation to select optimal number of components
-  tune_result <- tune.block.splsda(
+  tune_result <- tune_block_splsda_logged(
     X = X,
     Y = Y,
     ncomp = max_comp,
@@ -29,7 +65,9 @@ tune_block_splsda_components <- function(X, Y, design, validation = "Mfold",
     validation = validation,
     folds = folds,
     nrepeat = nrepeat,
-    measure = "BER"  # Balanced Error Rate
+    measure = "BER",
+    workers = workers,
+    operation_name = "Component Tuning"
   )
   
   # Extract optimal number of components
@@ -48,20 +86,39 @@ tune_block_splsda_components <- function(X, Y, design, validation = "Mfold",
 
 # Function to tune keepX parameters (variable selection)
 tune_keepx_parameters <- function(X, Y, design, ncomp, validation = "Mfold", 
-                                folds = 5, nrepeat = 10) {
-  cat("Tuning keepX parameters for variable selection...\n")
+                                folds = 5, nrepeat = 10, workers = NULL) {
   
-  # Define test values for keepX
+  if (is.null(workers)) {
+    workers <- detect_hpc_cores()
+  }
+  
+  cat("Tuning keepX parameters for variable selection using", workers, "cores...\n")
+  
+  # Set up parallel backend with logging
+  BPPARAM <- create_logged_bppar(workers)
+  
+  # Reduce parameters for faster tuning
+  folds <- min(folds, 3)  # Use 3-fold CV for speed
+  nrepeat <- min(nrepeat, 3)  # Use 3 repeats for initial tuning
+  
+  # Define optimized test values for keepX (reduced from 216 to 27 combinations)
   test_keepx <- list()
   for (block_name in names(X)) {
     if (block_name == "mRNA") {
-      test_keepx[[block_name]] <- c(5, 10, 15, 20, 25, 30)
+      test_keepx[[block_name]] <- c(15, 25, 35)  # Strategic values for 5000 genes
     } else if (block_name == "miRNA") {
-      test_keepx[[block_name]] <- c(5, 10, 15, 20, 25)
+      test_keepx[[block_name]] <- c(10, 15, 20)  # Strategic values for 200 miRNAs
     } else if (block_name == "protein") {
-      test_keepx[[block_name]] <- c(5, 10, 15, 20)
+      test_keepx[[block_name]] <- c(10, 15, 20)  # Strategic values for 463 proteins
     }
   }
+  
+  # Log optimization details
+  total_models <- length(test_keepx[[1]]) * length(test_keepx[[2]]) * 
+                  ifelse(length(names(X)) == 3, length(test_keepx[[3]]), 1) * 
+                  ncomp * nrepeat
+  cat("Total models to fit:", total_models, "(optimized from 2160+)\n")
+  cat("Estimated runtime:", round(total_models / (workers * 60), 1), "minutes on", workers, "cores\n")
   
   # Perform tuning
   tune_keepx_result <- tune.block.splsda(
@@ -73,7 +130,8 @@ tune_keepx_parameters <- function(X, Y, design, ncomp, validation = "Mfold",
     folds = folds,
     nrepeat = nrepeat,
     test.keepX = test_keepx,
-    measure = "BER"
+    measure = "BER",
+    BPPARAM = BPPARAM
   )
   
   # Extract optimal keepX values
@@ -258,6 +316,55 @@ design_matrix <- train_processed$design
 X_test <- test_processed$X
 Y_test <- test_processed$Y
 
+# DEBUG: Log data structure before analysis
+log_info("=== DEBUG: Data Structure for Block sPLS-DA ===")
+
+log_info("--- Training Data ---")
+for (block_name in names(X_train)) {
+  log_data_summary(X_train[[block_name]], paste(block_name, "training data"), "matrix")
+  log_info("First 5 rows x 5 cols:\n%s", 
+           paste(capture.output(head(X_train[[block_name]][1:5, 1:5])), collapse="\n"))
+  log_info("Row names (samples, first 10): %s", 
+           paste(head(rownames(X_train[[block_name]]), 10), collapse=", "))
+  log_info("Column names (features, first 10): %s", 
+           paste(head(colnames(X_train[[block_name]]), 10), collapse=", "))
+}
+
+log_info("Y_train vector: length=%d", length(Y_train))
+log_info("First 10 values: %s", paste(head(Y_train, 10), collapse=", "))
+log_info("Names (samples, first 10): %s", paste(head(names(Y_train), 10), collapse=", "))
+
+log_info("--- Test Data ---")
+for (block_name in names(X_test)) {
+  log_data_summary(X_test[[block_name]], paste(block_name, "test data"), "matrix")
+  log_info("First 5 rows x 5 cols:\n%s", 
+           paste(capture.output(head(X_test[[block_name]][1:5, 1:5])), collapse="\n"))
+  log_info("Row names (samples, first 10): %s", 
+           paste(head(rownames(X_test[[block_name]]), 10), collapse=", "))
+  log_info("Column names (features, first 10): %s", 
+           paste(head(colnames(X_test[[block_name]]), 10), collapse=", "))
+}
+
+log_info("Y_test vector: length=%d", length(Y_test))
+log_info("First 10 values: %s", paste(head(Y_test, 10), collapse=", "))
+log_info("Names (samples, first 10): %s", paste(head(names(Y_test), 10), collapse=", "))
+
+# DEBUG: Check alignment between X and Y
+log_info("--- Data Alignment Check ---")
+log_info("Training data alignment:")
+for (block_name in names(X_train)) {
+  match_status <- all(rownames(X_train[[block_name]]) == names(Y_train))
+  log_info("  %s: %s", block_name, match_status)
+}
+
+log_info("Test data alignment:")
+for (block_name in names(X_test)) {
+  match_status <- all(rownames(X_test[[block_name]]) == names(Y_test))
+  log_info("  %s: %s", block_name, match_status)
+}
+
+log_info("Design matrix:\n%s", paste(capture.output(design_matrix), collapse="\n"))
+
 # Step 1: Tune number of components
 component_tuning <- tune_block_splsda_components(
   X = X_train,
@@ -383,3 +490,7 @@ for (block_name in names(results_summary$important_vars_summary)) {
 cat("Block sPLS-DA analysis completed successfully!\n")
 cat("Results saved to:", multiomics_dir, "\n")
 cat("Summary tables saved to:", tables_dir, "\n")
+
+# Close output capture
+sink(type = "output")
+sink(type = "message")

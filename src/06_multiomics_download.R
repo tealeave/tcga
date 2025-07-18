@@ -147,45 +147,39 @@ process_mirna_files <- function(query_mirna) {
     mirna_counts[, sample_id] <- ifelse(is.na(matched_ids), 0, sample_counts[matched_ids])
   }
   
-  # Try to map UUIDs to TCGA sample IDs
-  log_info("Mapping file UUIDs to TCGA sample IDs...")
+  # Extract TCGA sample barcodes from cases field
+  log_info("Extracting TCGA sample barcodes from cases field...")
   
-  # Use the file information to map UUIDs to sample IDs
   if ("cases" %in% names(files_info)) {
-    # Extract sample IDs from the cases information
-    sample_mapping <- data.frame(
-      file_id = files_info$id,
-      sample_id = sapply(files_info$cases, function(x) {
-        if (length(x) > 0 && "samples" %in% names(x[[1]])) {
-          x[[1]]$samples[[1]]$submitter_id
-        } else {
-          NA
-        }
-      }),
-      stringsAsFactors = FALSE
-    )
-    
-    # Update column names where mapping is available
-    for (i in 1:nrow(sample_mapping)) {
-      if (!is.na(sample_mapping$sample_id[i])) {
-        col_idx <- which(colnames(mirna_counts) == sample_mapping$file_id[i])
-        if (length(col_idx) > 0) {
-          colnames(mirna_counts)[col_idx] <- sample_mapping$sample_id[i]
-        }
+    # Get TCGA barcodes directly from cases
+    tcga_barcodes <- sapply(files_info$cases, function(x) {
+      if (length(x) > 0) {
+        return(as.character(x[[1]]))
       }
-    }
+      return(NA)
+    })
     
-    # Create sample metadata
+    # Filter valid barcodes
+    valid_idx <- !is.na(tcga_barcodes)
+    tcga_barcodes <- tcga_barcodes[valid_idx]
+    
+    # Filter counts matrix to match valid barcodes
+    mirna_counts <- mirna_counts[, valid_idx]
+    
+    # Use TCGA barcodes directly as sample identifiers
+    colnames(mirna_counts) <- tcga_barcodes
+    
+    # Create sample metadata with TCGA barcodes
     mirna_samples <- data.frame(
-      submitter_id = colnames(mirna_counts),
+      submitter_id = tcga_barcodes,
       sample_type = "Primary Tumor",
       stringsAsFactors = FALSE
     )
-    rownames(mirna_samples) <- colnames(mirna_counts)
+    rownames(mirna_samples) <- tcga_barcodes
     
   } else {
-    # Fallback: use file IDs as sample IDs
-    log_warn("Could not map file UUIDs to sample IDs, using file IDs")
+    # Fallback: use file IDs (should not happen with proper query)
+    log_warn("Could not extract TCGA barcodes, using file IDs")
     mirna_samples <- data.frame(
       submitter_id = colnames(mirna_counts),
       sample_type = "Primary Tumor",
@@ -508,16 +502,26 @@ create_train_test_sets <- function(mrna_data, mirna_data, protein_data, subtype_
            nrow(mirna_data$counts), ncol(mirna_data$counts), 
            nrow(protein_data$matrix), ncol(protein_data$matrix))
   
-  # Extract patient barcodes from sample barcodes (assume TCGA format: first 12 characters)
+  # Extract patient barcodes from sample barcodes (use exact patient ID extraction)
   
   # Log actual sample names to understand naming patterns
   log_info("Sample mRNA names (first 5): %s", paste(head(colnames(mrna_data$counts), 5), collapse=", "))
   log_info("Sample miRNA names (first 5): %s", paste(head(colnames(mirna_data$counts), 5), collapse=", "))
   log_info("Sample protein names (first 5): %s", paste(head(colnames(protein_data$matrix), 5), collapse=", "))
   
-  mrna_patients <- substr(colnames(mrna_data$counts), 1, 12)
-  mirna_patients <- substr(colnames(mirna_data$counts), 1, 12)
-  protein_patients <- substr(colnames(protein_data$matrix), 1, 12)
+  # Use consistent patient ID extraction across all datasets
+  extract_patient_id <- function(sample_barcode) {
+    # Extract the patient ID (first 12 characters after TCGA-)
+    if (grepl("^TCGA-[A-Z0-9]{2}-[A-Z0-9]{4}", sample_barcode)) {
+      return(substr(sample_barcode, 1, 12))
+    } else {
+      return(sample_barcode)  # fallback
+    }
+  }
+  
+  mrna_patients <- sapply(colnames(mrna_data$counts), extract_patient_id)
+  mirna_patients <- sapply(colnames(mirna_data$counts), extract_patient_id)
+  protein_patients <- sapply(colnames(protein_data$matrix), extract_patient_id)
   
   # Log extracted patient IDs to verify extraction logic
   log_info("Extracted mRNA patient IDs (first 5): %s", paste(head(unique(mrna_patients), 5), collapse=", "))
@@ -531,16 +535,72 @@ create_train_test_sets <- function(mrna_data, mirna_data, protein_data, subtype_
   log_info("Patients extracted - mRNA: %d, miRNA: %d, protein: %d, common: %d", 
            length(unique(mrna_patients)), length(unique(mirna_patients)), 
            length(unique(protein_patients)), length(common_patients))
+
+  # Find actual sample barcodes that exist across all three datasets for common patients
+  # Create mapping from patient IDs to sample barcodes for each omics type
+  mrna_patient_sample_map <- data.frame(
+    patient_id = mrna_patients,
+    sample_id = colnames(mrna_data$counts),
+    stringsAsFactors = FALSE
+  )
+
+  # Print the first few rows of the mapping for verification
+  log_info("mRNA patient-sample mapping (first 5 rows):\n%s", 
+           paste(capture.output(head(mrna_patient_sample_map)), collapse="\n"))
   
-  # Filter subtype info for common patients
-  available_subtypes <- subtype_info[subtype_info$patient_id %in% common_patients, ]
+  mirna_patient_sample_map <- data.frame(
+    patient_id = mirna_patients,
+    sample_id = colnames(mirna_data$counts),
+    stringsAsFactors = FALSE
+  )
+  
+  protein_patient_sample_map <- data.frame(
+    patient_id = protein_patients,
+    sample_id = colnames(protein_data$matrix),
+    stringsAsFactors = FALSE
+  )
+  
+  # Find patients who have samples in all three datasets
+  patients_with_all_omics <- common_patients[
+    common_patients %in% mrna_patient_sample_map$patient_id &
+    common_patients %in% mirna_patient_sample_map$patient_id &
+    common_patients %in% protein_patient_sample_map$patient_id
+  ]
+  
+  # Create unified sample sets for each patient across all omics, this is a df with 1 col "patien_id"
+  unified_samples <- data.frame(
+    patient_id = patients_with_all_omics,
+    stringsAsFactors = FALSE
+  )
+  
+  # Map each patient to their actual sample barcodes in each omics
+  unified_samples$mrna_sample <- sapply(patients_with_all_omics, function(patient) {
+    mrna_patient_sample_map$sample_id[mrna_patient_sample_map$patient_id == patient][1]
+  })
+  
+  unified_samples$mirna_sample <- sapply(patients_with_all_omics, function(patient) {
+    mirna_patient_sample_map$sample_id[mirna_patient_sample_map$patient_id == patient][1]
+  })
+  
+  unified_samples$protein_sample <- sapply(patients_with_all_omics, function(patient) {
+    protein_patient_sample_map$sample_id[protein_patient_sample_map$patient_id == patient][1]
+  })
+  
+  log_info("Unified samples created for %d patients across all omics", nrow(unified_samples))
+
+  # Print the first few rows of unified samples for verification
+  log_info("Unified samples (first 5 rows):\n%s", 
+           paste(capture.output(head(unified_samples)), collapse="\n"))
+
+  # Filter subtype info for patients with all omics data
+  available_subtypes <- subtype_info[subtype_info$patient_id %in% unified_samples$patient_id, ]
   
   # Log available subtypes before filtering
   log_info("Available subtypes: %s", paste(unique(available_subtypes$subtype), collapse=", "))
   log_info("Patients with subtype info: %d", nrow(available_subtypes))
   
-  # Focus on main subtypes: Basal, Her2, LumA (with BRCA. prefix)
-  main_subtypes <- available_subtypes[available_subtypes$subtype %in% c("BRCA.Basal", "BRCA.Her2", "BRCA.LumA"), ]
+  # Focus on main subtypes: Basal, Her2, LumA, LumB (exclude Normal)
+  main_subtypes <- available_subtypes[!available_subtypes$subtype %in% c("BRCA.Normal"), ]
   
   # Log filtering results
   log_info("Patients after main subtype filtering: %d", nrow(main_subtypes))
@@ -553,8 +613,19 @@ create_train_test_sets <- function(mrna_data, mirna_data, protein_data, subtype_
     ungroup() %>%
     pull(patient_id)
   
-  # Map back to samples (filter samples belonging to these patients)
-  train_samples <- colnames(mrna_data$counts)[mrna_patients %in% train_patients]
+  # Filter unified_samples for training patients and use omics-specific samples for subsetting
+  train_unified <- unified_samples[unified_samples$patient_id %in% train_patients, ]
+  
+  # Create training data using omics-specific sample barcodes
+  train_data <- list(
+    mrna = mrna_data$counts[, train_unified$mrna_sample],
+    mirna = mirna_data$counts[, train_unified$mirna_sample],
+    protein = protein_data$matrix[, train_unified$protein_sample],
+    subtypes = data.frame(
+      sample_id = train_unified$mrna_sample,  # Use mRNA samples as reference for subtypes
+      subtype = main_subtypes$subtype[match(train_unified$patient_id, main_subtypes$patient_id)]
+    )
+  )
   
   # Create test set (up to 75 patients, ~25 per subtype, with only mRNA and miRNA)
   remaining_patients <- setdiff(main_subtypes$patient_id, train_patients)
@@ -565,45 +636,30 @@ create_train_test_sets <- function(mrna_data, mirna_data, protein_data, subtype_
     ungroup() %>%
     pull(patient_id)
   
-  test_samples <- colnames(mrna_data$counts)[mrna_patients %in% test_patients]
+  # Filter unified_samples for test patients
+  test_unified <- unified_samples[unified_samples$patient_id %in% test_patients, ]
   
-  # Map subtypes back to samples (repeat patient subtype for each sample)
-  train_subtypes <- data.frame(
-    sample_id = train_samples,
-    subtype = main_subtypes$subtype[match(substr(train_samples, 1, 12), main_subtypes$patient_id)]
-  )
-  
-  test_subtypes <- data.frame(
-    sample_id = test_samples,
-    subtype = main_subtypes$subtype[match(substr(test_samples, 1, 12), main_subtypes$patient_id)]
-  )
-  
-  # Create training data
-  train_data <- list(
-    mrna = mrna_data$counts[, train_samples],
-    mirna = mirna_data$counts[, train_samples],
-    protein = protein_data$matrix[, train_samples],
-    subtypes = train_subtypes
-  )
-  
-  # Create test data (missing protein data)
+  # Create test data using omics-specific sample barcodes (protein missing as per methodology)
   test_data <- list(
-    mrna = mrna_data$counts[, test_samples],
-    mirna = mirna_data$counts[, test_samples],
+    mrna = mrna_data$counts[, test_unified$mrna_sample],
+    mirna = mirna_data$counts[, test_unified$mirna_sample],
     protein = NULL,  # Missing protein data as in the DIABLO methodology
-    subtypes = test_subtypes
+    subtypes = data.frame(
+      sample_id = test_unified$mrna_sample,  # Use mRNA samples as reference for subtypes
+      subtype = main_subtypes$subtype[match(test_unified$patient_id, main_subtypes$patient_id)]
+    )
   )
   
   # Save training and test sets
   save(train_data, file = file.path(multiomics_dir, "train_data.RData"))
   save(test_data, file = file.path(multiomics_dir, "test_data.RData"))
   
-  cat("Training set created with", length(train_samples), "samples (", length(train_patients), "patients)\n")
-  cat("Test set created with", length(test_samples), "samples (", length(test_patients), "patients)\n")
+  cat("Training set created with", nrow(train_unified), "samples (", length(train_patients), "patients)\n")
+  cat("Test set created with", nrow(test_unified), "samples (", length(test_patients), "patients)\n")
   
   # Log final results
-  log_info("Created training set: %d samples (%d patients)", length(train_samples), length(train_patients))
-  log_info("Created test set: %d samples (%d patients)", length(test_samples), length(test_patients))
+  log_info("Created training set: %d samples (%d patients)", nrow(train_unified), length(train_patients))
+  log_info("Created test set: %d samples (%d patients)", nrow(test_unified), length(test_patients))
   cat("Training subtypes:", table(train_data$subtypes$subtype), "\n")
   cat("Test subtypes:", table(test_data$subtypes$subtype), "\n")
   
@@ -612,6 +668,10 @@ create_train_test_sets <- function(mrna_data, mirna_data, protein_data, subtype_
 
 
 # Main execution
+# Simple global output capture
+sink("logs/tcga_pipeline_output.log", append = TRUE)
+sink("logs/tcga_pipeline_output.log", type = "message", append = TRUE)
+
 cat("=== Multi-omics Data Download ===\n")
 
 # Download all data types
@@ -619,6 +679,10 @@ mrna_data <- download_mrna_data()
 mirna_data <- download_mirna_data()
 protein_data <- download_protein_data()
 subtype_info <- get_subtype_info()
+
+# Print a couple rows of the subtype information for verification
+log_info("Subtype information (first 5 rows):\n%s",
+         paste(capture.output(head(subtype_info)), collapse="\n"))
 
 # Create train/test splits
 datasets <- create_train_test_sets(mrna_data, mirna_data, protein_data, subtype_info)
@@ -635,5 +699,62 @@ download_summary <- list(
 
 save(download_summary, file = file.path(multiomics_dir, "download_summary.RData"))
 
+# DEBUG: Print detailed data structure information
+log_info("=== DEBUG: Final Data Structure Analysis ===")
+
+# Log training data structure
+log_info("--- Training Data Heads ---")
+for (block_name in c("mrna", "mirna", "protein")) {
+  if (!is.null(datasets$train[[block_name]])) {
+    log_data_summary(datasets$train[[block_name]], paste(block_name, "training data"), "matrix")
+    log_info("First 5 rows x 5 cols:\n%s", 
+             paste(capture.output(head(datasets$train[[block_name]][1:5, 1:5])), collapse="\n"))
+    log_info("Column names (samples, first 10): %s", 
+             paste(head(colnames(datasets$train[[block_name]]), 10), collapse=", "))
+  }
+}
+
+log_data_summary(datasets$train$subtypes, "Training subtypes", "data.frame")
+
+# Log test data structure  
+log_info("--- Test Data Heads ---")
+for (block_name in c("mrna", "mirna", "protein")) {
+  if (!is.null(datasets$test[[block_name]])) {
+    log_data_summary(datasets$test[[block_name]], paste(block_name, "test data"), "matrix")
+    log_info("First 5 rows x 5 cols:\n%s", 
+             paste(capture.output(head(datasets$test[[block_name]][1:5, 1:5])), collapse="\n"))
+    log_info("Column names (samples, first 10): %s", 
+             paste(head(colnames(datasets$test[[block_name]]), 10), collapse=", "))
+  }
+}
+
+log_data_summary(datasets$test$subtypes, "Test subtypes", "data.frame")
+
+# Log sample counts
+log_info("Training sample counts - mRNA: %d, miRNA: %d, protein: %d, subtypes: %d", 
+         ncol(datasets$train$mrna), ncol(datasets$train$mirna), 
+         ncol(datasets$train$protein), nrow(datasets$train$subtypes))
+
+log_info("Test sample counts - mRNA: %d, miRNA: %d, subtypes: %d", 
+         ncol(datasets$test$mrna), ncol(datasets$test$mirna), nrow(datasets$test$subtypes))
+
+# Check sample name matching
+train_mrna_match <- all(colnames(datasets$train$mrna) == datasets$train$subtypes$sample_id)
+train_mirna_match <- all(colnames(datasets$train$mirna) == datasets$train$subtypes$sample_id)
+train_protein_match <- all(colnames(datasets$train$protein) == datasets$train$subtypes$sample_id)
+
+test_mrna_match <- all(colnames(datasets$test$mrna) == datasets$test$subtypes$sample_id)
+test_mirna_match <- all(colnames(datasets$test$mirna) == datasets$test$subtypes$sample_id)
+
+log_info("Training set name matching - mRNA vs subtypes: %s, miRNA vs subtypes: %s, protein vs subtypes: %s", 
+         train_mrna_match, train_mirna_match, train_protein_match)
+
+log_info("Test set name matching - mRNA vs subtypes: %s, miRNA vs subtypes: %s", 
+         test_mrna_match, test_mirna_match)
+
 cat("Multi-omics data download completed successfully!\n")
 cat("Data saved to:", multiomics_dir, "\n")
+
+# Close output capture
+sink(type = "output")
+sink(type = "message")
