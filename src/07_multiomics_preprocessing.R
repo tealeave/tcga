@@ -8,9 +8,20 @@ suppressMessages({
   library(mixOmics)
 })
 
-# Simple global output capture
-sink("logs/tcga_pipeline_output.log", append = TRUE)
-sink("logs/tcga_pipeline_output.log", type = "message", append = TRUE)
+# Ensure logs directory exists and setup safe output capture
+if (!dir.exists("logs")) {
+  dir.create("logs", showWarnings = FALSE)
+}
+
+tryCatch({
+  # Check if sink is already active
+  if (sink.number() == 0) {
+    sink("logs/tcga_pipeline_output.log", append = TRUE)
+    sink("logs/tcga_pipeline_output.log", type = "message", append = TRUE)
+  }
+}, error = function(e) {
+  warning("Could not set up output capture: ", e$message)
+})
 
 cat("Loading multi-omics preprocessing functions...\n")
 
@@ -476,6 +487,14 @@ cat("  Outcome distribution:", paste(names(test_summary$outcome),
 
 cat("Multi-omics preprocessing completed successfully!\n")
 
-# Close output capture
-sink(type = "output")
-sink(type = "message")
+# Close output capture - only close if we opened it
+tryCatch({
+  if (sink.number("output") > 0) {
+    sink(type = "output")
+  }
+  if (sink.number("message") > 0) {
+    sink(type = "message")
+  }
+}, error = function(e) {
+  warning("Could not close output capture: ", e$message)
+})

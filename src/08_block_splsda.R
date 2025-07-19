@@ -9,9 +9,20 @@ suppressMessages({
   library(BiocParallel)
 })
 
-# Simple global output capture
-sink("logs/tcga_pipeline_output.log", append = TRUE)
-sink("logs/tcga_pipeline_output.log", type = "message", append = TRUE)
+# Ensure logs directory exists and setup safe output capture
+if (!dir.exists("logs")) {
+  dir.create("logs", showWarnings = FALSE)
+}
+
+tryCatch({
+  # Check if sink is already active
+  if (sink.number() == 0) {
+    sink("logs/tcga_pipeline_output.log", append = TRUE)
+    sink("logs/tcga_pipeline_output.log", type = "message", append = TRUE)
+  }
+}, error = function(e) {
+  warning("Could not set up output capture: ", e$message)
+})
 
 cat("Loading Block sPLS-DA analysis functions...\n")
 
@@ -491,6 +502,14 @@ cat("Block sPLS-DA analysis completed successfully!\n")
 cat("Results saved to:", multiomics_dir, "\n")
 cat("Summary tables saved to:", tables_dir, "\n")
 
-# Close output capture
-sink(type = "output")
-sink(type = "message")
+# Close output capture - only close if we opened it
+tryCatch({
+  if (sink.number("output") > 0) {
+    sink(type = "output")
+  }
+  if (sink.number("message") > 0) {
+    sink(type = "message")
+  }
+}, error = function(e) {
+  warning("Could not close output capture: ", e$message)
+})

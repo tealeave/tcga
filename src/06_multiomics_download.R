@@ -668,9 +668,21 @@ create_train_test_sets <- function(mrna_data, mirna_data, protein_data, subtype_
 
 
 # Main execution
-# Simple global output capture
-sink("logs/tcga_pipeline_output.log", append = TRUE)
-sink("logs/tcga_pipeline_output.log", type = "message", append = TRUE)
+# Ensure logs directory exists and setup output capture
+if (!dir.exists("logs")) {
+  dir.create("logs", showWarnings = FALSE)
+}
+
+# Simple global output capture - only capture if not already open
+tryCatch({
+  # Check if sink is already active
+  if (sink.number() == 0) {
+    sink("logs/tcga_pipeline_output.log", append = TRUE)
+    sink("logs/tcga_pipeline_output.log", type = "message", append = TRUE)
+  }
+}, error = function(e) {
+  warning("Could not set up output capture: ", e$message)
+})
 
 cat("=== Multi-omics Data Download ===\n")
 
@@ -755,6 +767,14 @@ log_info("Test set name matching - mRNA vs subtypes: %s, miRNA vs subtypes: %s",
 cat("Multi-omics data download completed successfully!\n")
 cat("Data saved to:", multiomics_dir, "\n")
 
-# Close output capture
-sink(type = "output")
-sink(type = "message")
+# Close output capture - only close if we opened it
+tryCatch({
+  if (sink.number("output") > 0) {
+    sink(type = "output")
+  }
+  if (sink.number("message") > 0) {
+    sink(type = "message")
+  }
+}, error = function(e) {
+  warning("Could not close output capture: ", e$message)
+})
